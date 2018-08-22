@@ -19,7 +19,6 @@ typedef struct task {
 } task;
 
 typedef struct task_return {
-	int arg;
 	enum return_type {
 		TASK, IMMEDIATE
 	} type;
@@ -32,13 +31,12 @@ typedef struct task_return {
 	} value;
 } task_return;
 
-void fib_function(void * thread_return_value) {
-	int fib_count = ((struct task_return *) thread_return_value)->arg;
+void fib_function(int arg, struct task_return* function_return_value) {
 	double prev_value;
 	struct task_return return_value;
-	if (fib_count < THRESHOLD) {
+	if (arg < THRESHOLD) {
 		long fib_value;
-		for (int i = 0; i <= fib_count; i++) {
+		for (int i = 0; i <= arg; i++) {
 			if (i == 0) {
 				fib_value = 0;
 			} else if (i == 1) {
@@ -54,10 +52,10 @@ void fib_function(void * thread_return_value) {
 		return_value.value.value = fib_value;
 	} else {
 		task* children = (task*) calloc(2, sizeof(task));
-		children[0].arg = fib_count - 1;
+		children[0].arg = arg - 1;
 		children[0].task_id = 1;
 
-		children[1].arg = fib_count - 2;
+		children[1].arg = arg - 2;
 		children[1].task_id = 1;
 
 		return_value.type = TASK;
@@ -65,8 +63,7 @@ void fib_function(void * thread_return_value) {
 		return_value.value.task_value.num_tasks = 2;
 	}
 
-	*((struct task_return*) thread_return_value) = return_value;
-	pthread_exit(thread_return_value);
+	*((struct task_return*) function_return_value) = return_value;
 }
 
 int main(int argc, char ** argv) {
@@ -170,9 +167,7 @@ int main(int argc, char ** argv) {
 		if (current.task_id >= 0) {
 			pthread_t thread;
 			struct task_return *return_value = malloc(sizeof(struct task_return));
-			return_value->arg = current.arg;
-			pthread_create(&thread, NULL, (void*) fib_function, return_value);
-			pthread_join(thread, NULL);
+			fib_function(current.arg, return_value);
 			if (return_value->type == IMMEDIATE) {
 				sum += return_value->value.value;
 			} else if(task_ptr[2] == rank){
