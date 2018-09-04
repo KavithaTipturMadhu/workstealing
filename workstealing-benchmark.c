@@ -7,15 +7,15 @@
 
 #include "mpi.h"
 #include <stdio.h>
-#include <pthread.h>
 #include <stdlib.h>
-#define N 10
-#define QUEUE_SIZE 2048
-#define THRESHOLD 8
+#define N 30
+#define THRESHOLD 2
+#define TERMINATION_THRESHOLD 8192
+#define QUEUE_SIZE (65536*64)
 
 typedef struct task {
-	int arg;
-	int task_id;
+	char arg;
+	char valid;
 } task;
 
 typedef struct task_return {
@@ -53,10 +53,10 @@ void fib_function(int arg, struct task_return* function_return_value) {
 	} else {
 		task* children = (task*) calloc(2, sizeof(task));
 		children[0].arg = arg - 1;
-		children[0].task_id = 1;
+		children[0].valid = 1;
 
 		children[1].arg = arg - 2;
-		children[1].task_id = 1;
+		children[1].valid = 1;
 
 		return_value.type = TASK;
 		return_value.value.task_value.task_list = children;
@@ -69,7 +69,7 @@ void fib_function(int arg, struct task_return* function_return_value) {
 int main(int argc, char ** argv) {
 	int rank, size;
 	task * task_queue = (task *) calloc(QUEUE_SIZE, sizeof(task));
-	/* Front pointer at 1, back pointer at 2, spin lock at 0*/
+	/* Front pointer at 0, back pointer at 1, spin lock at 2, attempts in 3*/
 	int task_ptr[3];
 	MPI_Win task_win, task_ptr_win;
 	unsigned int seed;
@@ -83,27 +83,32 @@ int main(int argc, char ** argv) {
 	int lock_value = rank;
 	int prev_value;
 	int num_attempts = 0;
+	int num_tasks = 0;
 
 	//Initialize some tasks in each queue per process
 	if (rank == 0) {
 		struct task start_task;
 		start_task.arg = N;
-		start_task.task_id = 1;
+		start_task.valid = 1;
 		task_queue[0] = start_task;
 		task_ptr[0] = 0;
-
 		task_ptr[1] = 1;
-		task_ptr[2] = -1;
-	} else {
+//	} else if(rank == size/2){
+//		struct task start_task;
+//		start_task.arg = N - 2;
+//		start_task.valid = 1;
+//		task_queue[0] = start_task;
+//		task_ptr[0] = 0;
+//		task_ptr[1] = 1;
+	}else{
 		task_ptr[0] = 0;
 		task_ptr[1] = 0;
-		task_ptr[2] = -1;
 	}
+	task_ptr[2] = -1;
 
 	double start_time = MPI_Wtime();
 
-	MPI_Info info = MPI_INFO_NULL;
-	MPI_Win_create(&task_queue[0], QUEUE_SIZE * sizeof(struct task), sizeof(struct task), info,
+	MPI_Win_create(&task_queue[0], QUEUE_SIZE, sizeof(struct task), MPI_INFO_NULL,
 	MPI_COMM_WORLD, &task_win);
 
 	MPI_Win_create(&task_ptr[0], 3, sizeof(int), MPI_INFO_NULL,
@@ -114,69 +119,73 @@ int main(int argc, char ** argv) {
 	int remoteflag[3] = { 0, 0, -1 };
 	task current;
 	current.arg = -1;
-
+	long int* num_steals = calloc(size, sizeof(long int));
+	int num_iterations =0;
 	while (1) {
-		int global_num_attempts = num_attempts;
-		MPI_Request request;
-		MPI_Status status;
-		MPI_Iallreduce(&num_attempts, &global_num_attempts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD, &request);
-		MPI_Wait(&request,&status);
-		if (global_num_attempts > 0) {
-			break;
-		}
 		task current;
-		current.task_id = -1;
-
+		current.valid = -1;
 		int count = 0;
 		int i = rank;
-		while(count++<size) {
+		if(num_iterations>=TERMINATION_THRESHOLD){
+			int global_attempts;
+			MPI_Allreduce(&num_attempts, &global_attempts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+			if(global_attempts>0){
+				break;
+			}
+		}
+		while (count++ < size) {
 			int remoteflag[3] = { 0, 0, -1 };
 			MPI_Win_lock(MPI_LOCK_SHARED, i, MPI_MODE_NOCHECK, task_ptr_win);
 			MPI_Compare_and_swap(&lock_value, &compare_value, &prev_value, MPI_INT, i, 2, task_ptr_win);
 			MPI_Get(&remoteflag[0], 3, MPI_INT, i, 0, 3, MPI_INT, task_ptr_win);
-			MPI_Win_flush(i, task_ptr_win);
-			MPI_Win_unlock(i, task_ptr_win);
-			MPI_Win_fence(MPI_MODE_NOCHECK, task_ptr_win);
+			MPI_Win_flush_local(i, task_ptr_win);
+//			MPI_Win_unlock(i, task_ptr_win);
+//			MPI_Win_fence(MPI_LOCK_SHARED, task_ptr_win);
 
-			if(remoteflag[2] == rank &&  current.task_id == -1 && remoteflag[0] != remoteflag[1] && remoteflag[1] != -1 && remoteflag[0] < QUEUE_SIZE) {
-				MPI_Win_lock(MPI_LOCK_SHARED, i, MPI_MODE_NOCHECK, task_ptr_win);
-				MPI_Get(&current, sizeof(struct task), MPI_BYTE, i, remoteflag[0], sizeof(struct task), MPI_BYTE, task_win);
-				remoteflag[0] = (remoteflag[0] + 1) % QUEUE_SIZE;
-				MPI_Put(&remoteflag[0], 1,
-				MPI_INT, i, 0, 1,
-				MPI_INT, task_ptr_win);
-				MPI_Win_flush(rank, task_ptr_win);
-				MPI_Win_unlock(i, task_ptr_win);
+//			MPI_Win_lock(MPI_LOCK_SHARED, i, MPI_MODE_NOCHECK, task_ptr_win);
+			if (remoteflag[2] == rank && current.valid == -1 && remoteflag[0] != remoteflag[1] && remoteflag[1] != -1 && remoteflag[0] < QUEUE_SIZE) {
+				if (i != rank) {
+					MPI_Get(&current, sizeof(struct task), MPI_BYTE, i, remoteflag[0], sizeof(struct task), MPI_BYTE, task_win);
+					remoteflag[0] = (remoteflag[0] + 1) % QUEUE_SIZE;
+					MPI_Put(&remoteflag[0], 1,
+					MPI_INT, i, 0, 1,
+					MPI_INT, task_ptr_win);
+					num_steals[i]++;
+				} else {
+					int tail = (task_ptr[1] - 1) % QUEUE_SIZE;
+					current = task_queue[tail];
+					task_ptr[1] = tail;
+				}
 			}
-			MPI_Win_fence(MPI_MODE_NOCHECK, task_ptr_win);
 
-			MPI_Win_lock(MPI_LOCK_SHARED, i, MPI_MODE_NOCHECK, task_ptr_win);
+			/* Replace with fetch and op */
 			MPI_Compare_and_swap(&compare_value, &lock_value, &prev_value, MPI_INT, i, 2, task_ptr_win);
-			MPI_Win_flush(i, task_ptr_win);
 			MPI_Win_unlock(i, task_ptr_win);
-			i = (i+1)%size;
+//			MPI_Win_fence(MPI_LOCK_SHARED, task_ptr_win);
+			if (current.valid != -1) {
+				break;
+			}
+			i = (i + 1) % size;
+//			if(rank >=size/2 && i<size/2){
+//				i = i+size/2;
+//			}else if(rank<size/2&& i>size/2){
+//				i = (i%(size/2));
+//			}
 		}
-		MPI_Win_fence(MPI_MODE_NOCHECK, task_ptr_win);
 
-		MPI_Win_lock(MPI_LOCK_SHARED, rank, MPI_MODE_NOCHECK, task_ptr_win);
-		MPI_Compare_and_swap(&lock_value, &compare_value, &prev_value, MPI_INT, rank, 2, task_ptr_win);
-		MPI_Win_flush(rank, task_ptr_win);
-		MPI_Win_unlock(rank, task_ptr_win);
-		MPI_Win_fence(MPI_MODE_NOCHECK, task_ptr_win);
-
-		if (current.task_id >= 0) {
-			pthread_t thread;
+		if (current.valid >= 0) {
 			struct task_return *return_value = malloc(sizeof(struct task_return));
+			num_tasks++;
 			fib_function(current.arg, return_value);
 			if (return_value->type == IMMEDIATE) {
 				sum += return_value->value.value;
-			} else if(task_ptr[2] == rank){
+			} else {
 				/* Queue the tasks in the local task queue */
 				for (int i = 0; i < return_value->value.task_value.num_tasks; i++) {
 					task_queue[task_ptr[1]] = return_value->value.task_value.task_list[i];
 					task_ptr[1] = (task_ptr[1] + 1) % QUEUE_SIZE;
-					if(task_ptr[1] == task_ptr[0]){
-						MPI_Abort(MPI_COMM_WORLD,  MPI_ERR_OTHER);
+					if (task_ptr[1] == task_ptr[0]) {
+						MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
 					}
 				}
 			}
@@ -184,20 +193,26 @@ int main(int argc, char ** argv) {
 		} else {
 			num_attempts++;
 		}
-
-		MPI_Win_lock(MPI_LOCK_SHARED, rank, MPI_MODE_NOCHECK, task_ptr_win);
-		MPI_Compare_and_swap(&compare_value, &lock_value, &prev_value, MPI_INT, rank, 2, task_ptr_win);
-		MPI_Win_flush(rank, task_ptr_win);
-		MPI_Win_unlock(rank, task_ptr_win);
-		MPI_Win_fence(MPI_MODE_NOCHECK, task_ptr_win);
+		num_iterations++;
 	}
 	MPI_Win_unlock_all(task_win);
-	MPI_Allreduce(MPI_IN_PLACE, &sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-	printf("global sum:%ld\n", sum);
+	int global_sum;
+	MPI_Allreduce(&sum, &global_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
 	MPI_Win_free(&task_win);
 	MPI_Win_free(&task_ptr_win);
-	double end_time = MPI_Wtime();
-	printf("Time: %lf\n", ((end_time-start_time)*10e6));
+	MPI_Barrier(MPI_COMM_WORLD);
 	free(task_queue);
+
+	if(rank == 0){
+		printf("%f %d\n", (MPI_Wtime()-start_time), num_tasks);
+	}
+//	printf("rank %d ", rank);
+//	for(int i=0;i<size;i++){
+//		printf("%d,",num_steals[i]);
+//	}
+//	printf("\n");
+	fflush(stdout);
+
+	MPI_Finalize();
 	return 0;
 }
