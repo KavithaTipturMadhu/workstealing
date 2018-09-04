@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #define N 30
 #define THRESHOLD 2
-#define TERMINATION_THRESHOLD 8192
+#define TERMINATION_THRESHOLD 4096
 #define QUEUE_SIZE (65536*64)
 
 typedef struct task {
@@ -121,17 +121,19 @@ int main(int argc, char ** argv) {
 	current.arg = -1;
 	long int* num_steals = calloc(size, sizeof(long int));
 	int num_iterations =0;
+	int sync_freq = 1;
 	while (1) {
 		task current;
 		current.valid = -1;
 		int count = 0;
 		int i = rank;
-		if(num_iterations>=TERMINATION_THRESHOLD){
+		if(num_iterations>=(TERMINATION_THRESHOLD/sync_freq)){
 			int global_attempts;
 			MPI_Allreduce(&num_attempts, &global_attempts, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
 			if(global_attempts>0){
 				break;
 			}
+			num_iterations = 0;
 		}
 		while (count++ < size) {
 			int remoteflag[3] = { 0, 0, -1 };
@@ -204,7 +206,7 @@ int main(int argc, char ** argv) {
 	free(task_queue);
 
 	if(rank == 0){
-		printf("%f %d\n", (MPI_Wtime()-start_time), num_tasks);
+		printf("%f\n", (MPI_Wtime()-start_time));
 	}
 //	printf("rank %d ", rank);
 //	for(int i=0;i<size;i++){
