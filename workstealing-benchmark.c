@@ -10,8 +10,10 @@
 #include <stdlib.h>
 //#define N 30
 #define THRESHOLD 2
-#define TERMINATION_THRESHOLD 4096
+#define TERMINATION_THRESHOLD 10
 #define QUEUE_SIZE (65536*64)
+#define MIN 30
+#define MAX 41
 
 typedef struct task {
 	char arg;
@@ -92,9 +94,8 @@ int main(int argc, char ** argv) {
 	MPI_Win_create(&task_ptr[0], 3, sizeof(int), MPI_INFO_NULL,
 	MPI_COMM_WORLD, &task_ptr_win);
 
-	for (N = 20; N < 41; N++) {
+	for (N = MIN; N < MAX; N++) {
 		MPI_Win_lock_all(MPI_MODE_NOCHECK, task_win);
-		double start_time = MPI_Wtime();
 		//Initialize some tasks in each queue per process
 		if (rank == 0) {
 			struct task start_task;
@@ -121,6 +122,7 @@ int main(int argc, char ** argv) {
 		long int* num_steals = calloc(size, sizeof(long int));
 		int num_iterations = 0;
 		int sync_freq = 1;
+		double start_time = MPI_Wtime();
 		while (1) {
 			task current;
 			current.valid = -1;
