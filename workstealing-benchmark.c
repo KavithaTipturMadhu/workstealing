@@ -2,7 +2,7 @@
 // Name        : workstealing-benchmark.cpp
 // Author      : 
 // Version     :
-// Copyright   : Your copyright notice
+// Copyright   : 
 //============================================================================
 
 #include "mpi.h"
